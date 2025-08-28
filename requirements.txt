@@ -1,9 +1,9 @@
-streamlit
+streamlit>=1.36
 pandas>=2.0
-playwright==1.46.0
+playwright==1.53.0
 openpyxl
 xlsxwriter
 streamlit-authenticator
-rapidfuzz
+rapidfuzz>=3
 greenlet==3.0.3
 

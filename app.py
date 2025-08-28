@@ -10,6 +10,24 @@ from scraper import scrape_hotels_for_dates, ddmmyyyy
 
 st.set_page_config(page_title="RateChecker • Booking.com", page_icon="🔎", layout="wide")
 
+# Ensure Playwright Chromium exists on Streamlit Cloud (runs once per container)
+import os, sys, subprocess, pathlib
+import streamlit as st  # must be imported before using st.warning below
+
+PLAYWRIGHT_CACHE = pathlib.Path.home() / ".cache" / "ms-playwright"
+if not PLAYWRIGHT_CACHE.exists():
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except Exception as e:
+        st.warning(f"Playwright install failed (will retry on next run): {e}")
+
+
 TITLE = "RateChecker — Booking.com"
 INTRO = "Fast price checker for Booking.com properties (cheapest public rates)."
 HOTEL_INFO = "Hotels"
