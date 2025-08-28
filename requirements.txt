@@ -1,9 +1,9 @@
 streamlit>=1.36
-pandas>=2.0
+pandas>=2
 playwright==1.53.0
+rapidfuzz>=3
 openpyxl
 xlsxwriter
-streamlit-authenticator
-rapidfuzz>=3
-greenlet==3.0.3
+# DO NOT PIN greenlet; Playwright will install a compatible version
+
 
