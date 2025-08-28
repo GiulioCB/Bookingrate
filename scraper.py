@@ -1,9 +1,9 @@
-
-# scraper.py — fast, Booking.com-only, classic logic + one-time breakfast check
+# scraper.py — fast, Booking.com-only, classic logic + resilient orchestration
 import os, sys, re, json, asyncio, random
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from urllib.parse import quote_plus, urlparse
+import pandas as pd
 
 from rapidfuzz import fuzz
 from playwright.async_api import async_playwright, Page, TimeoutError as PWTimeoutError
@@ -16,15 +16,37 @@ if sys.platform.startswith("win"):
         pass
 
 # ---------- Tunables (can override via environment) ----------
-NUM_CONCURRENCY = int(os.getenv("RC_CONCURRENCY", "4"))
+NUM_CONCURRENCY = int(os.getenv("RC_CONCURRENCY", "2"))
 NAV_TIMEOUT_MS  = int(os.getenv("RC_NAV_TIMEOUT_MS", "15000"))
 SEL_TIMEOUT_MS  = int(os.getenv("RC_SEL_TIMEOUT_MS", "9000"))
 SCAN_LIMIT      = int(os.getenv("RC_SCAN_LIMIT", "20"))  # how many price cells to scan per page
 
+# Optional pacing / asset controls
+JITTER_MIN_MS   = int(os.getenv("RC_JITTER_MIN_MS", "200"))
+JITTER_MAX_MS   = int(os.getenv("RC_JITTER_MAX_MS", "600"))
+BLOCK_MEDIA     = os.getenv("RC_BLOCK_MEDIA", "1") == "1"  # default ON in containers
+
 COMPANY = os.getenv("COMPANY_NAME", "CBRE")
 CONTACT = os.getenv("RC_CONTACT", "rates@example.com")
+PROXY_URL = os.getenv("PROXY_URL", "") or None
+
+# Chromium in containers
+LAUNCH_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
 
 # ---------- Utilities ----------
+def _jitter_seconds() -> float:
+    jmin = max(0, JITTER_MIN_MS)
+    jmax = max(jmin, JITTER_MAX_MS)
+    return random.uniform(jmin/1000.0, jmax/1000.0)
+
 def canonicalize_booking_url(u: Optional[str]) -> Optional[str]:
     if not u: return None
     u = u.strip()
@@ -57,7 +79,8 @@ def parse_money_max(text: str) -> Optional[float]:
         try:
             v = float(s)
             best = v if best is None else max(best, v)
-        except: pass
+        except: 
+            pass
     return best
 
 def detect_breakfast_included(text: str) -> Optional[bool]:
@@ -87,7 +110,8 @@ async def accept_cookies_if_present(page: Page):
             if await page.locator(sel).count():
                 await page.locator(sel).first.click(timeout=2000)
                 break
-        except: pass
+        except:
+            pass
 
 async def page_settle(page: Page):
     await page.wait_for_timeout(900)
@@ -95,7 +119,8 @@ async def page_settle(page: Page):
         for _ in range(2):
             await page.mouse.wheel(0, 1200)
             await page.wait_for_timeout(300)
-    except: pass
+    except:
+        pass
 
 async def _wait_for_any(page: Page, selectors: List[str], timeout: int) -> bool:
     end = asyncio.get_event_loop().time() + timeout/1000
@@ -247,7 +272,8 @@ def _pagename_from_url(url: str) -> Optional[str]:
         path = urlparse(url).path
         if "/hotel/" in path and path.endswith(".html"):
             return path.split("/")[-1].replace(".html","")
-    except: pass
+    except: 
+        pass
     return None
 
 def _extract_property_tokens_from_html(html: str) -> dict:
@@ -294,10 +320,10 @@ async def graphql_availability_price(page: Page, checkin: datetime, days: int = 
 
     days_data = data.get("data",{}).get("availabilityCalendar",{}).get("days",[]) or []
     target = next((d for d in days_data if d.get("checkin")==checkin.strftime("%Y-%m-%d")), None)
-    if not target:                return {"error":"date_not_in_calendar"}
+    if not target:                 return {"error":"date_not_in_calendar"}
     if not target.get("available",0): return {"error":"sold_out"}
     per = parse_money_max(target.get("avgPriceFormatted","") or "")
-    if per is None:              return {"error":"price_not_found"}
+    if per is None:               return {"error":"price_not_found"}
     minlos = int(target.get("minLengthOfStay") or 1)
     total  = round(per * minlos, 2)
     return {"nights_queried": minlos, "minstay_applied": (minlos>1),
@@ -337,39 +363,70 @@ async def get_price_for_dates(page: Page, property_url: str, checkin: datetime, 
         return gql
     return {"error": (gql or {}).get("error","no_rate")}
 
-# ---------- Task on a shared context ----------
-async def _scrape_one_on_context(context, hotel: Dict, checkin: datetime, selected_currency: str,
-                                 debug: bool=False, check_breakfast: bool=False) -> Dict:
+# ---------- One-task scrape with retries (per-task context) ----------
+async def _scrape_one(hotel: Dict, checkin: datetime, selected_currency: str,
+                      browser, debug: bool=False, check_breakfast: bool=False) -> Dict:
     hotel_name = hotel.get("name") or hotel.get("hotel") or ""
     provided_url = canonicalize_booking_url(hotel.get("url"))
-    page = await context.new_page()
-    page.set_default_timeout(max(NAV_TIMEOUT_MS, SEL_TIMEOUT_MS))
-    page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
+    max_attempts = 3
 
-    try:
-        url = provided_url or await resolve_property_url(page, hotel_name, city=None, debug=debug)
-        if not url:
-            await page.close()
-            return {"hotel": hotel_name, "date": iso(checkin), "status":"No rate found", "reason":"no_url"}
+    for attempt in range(1, max_attempts + 1):
+        context = None
+        try:
+            ctx_kwargs = {"locale": "de-DE",
+                          "user_agent": (f"{COMPANY}-RateChecker/1.0 (public rates; Playwright; contact: {CONTACT})")}
+            if PROXY_URL:
+                ctx_kwargs["proxy"] = {"server": PROXY_URL}
+            context = await browser.new_context(**ctx_kwargs)
 
-        result = await get_price_for_dates(page, url, checkin, nights=1, currency=selected_currency,
-                                           debug=debug, check_breakfast=check_breakfast)
-    except Exception as e:
-        await page.close()
-        return {"hotel": hotel_name, "date": iso(checkin), "status":"No rate found", "reason": f"exception:{e.__class__.__name__}"}
+            # Optional: block heavy assets
+            if BLOCK_MEDIA:
+                await context.route(
+                    "**/*",
+                    lambda route: route.abort() if route.request.resource_type in {"image","media","font"} else route.continue_()
+                )
 
-    await page.close()
-    if "error" in result:
-        return {"hotel": hotel_name, "date": iso(checkin), "status":"No rate found", "reason": result["error"]}
-    return {
-        "hotel": hotel_name, "date": iso(checkin), "status": "OK",
-        "value": result["per_night"], "total_for_queried_nights": result["total_incl_taxes"],
-        "nights_queried": result["nights_queried"], "minstay_applied": result["minstay_applied"],
-        "currency": selected_currency,
-        "breakfast_included": result.get("breakfast_included")  # True/False/None (only first date per hotel is checked)
-    }
+            page = await context.new_page()
+            page.set_default_timeout(max(NAV_TIMEOUT_MS, SEL_TIMEOUT_MS))
+            page.set_default_navigation_timeout(NAV_TIMEOUT_MS)
 
-# ---------- Orchestrator (single browser reused) ----------
+            # tiny pacing before first nav
+            await asyncio.sleep(_jitter_seconds())
+
+            url = provided_url or await resolve_property_url(page, hotel_name, city=None, debug=debug)
+            if not url:
+                return {"hotel": hotel_name, "date": iso(checkin), "status":"No rate found", "reason":"no_url"}
+
+            result = await get_price_for_dates(page, url, checkin, nights=1, currency=selected_currency,
+                                               debug=debug, check_breakfast=check_breakfast)
+
+            if "error" in result:
+                return {"hotel": hotel_name, "date": iso(checkin), "status":"No rate found", "reason": result["error"]}
+
+            return {
+                "hotel": hotel_name, "date": iso(checkin), "status": "OK",
+                "value": result["per_night"], "total_for_queried_nights": result["total_incl_taxes"],
+                "nights_queried": result["nights_queried"], "minstay_applied": result["minstay_applied"],
+                "currency": selected_currency,
+                "breakfast_included": result.get("breakfast_included")
+            }
+
+        except Exception as e:
+            msg = str(e)
+            # retry on transient "closed"/timeout errors
+            transient = ("Target" in msg and "closed" in msg) or ("Connection closed" in msg) or ("Timeout" in msg.lower())
+            if transient and attempt < max_attempts:
+                await asyncio.sleep(0.6 * attempt + _jitter_seconds())
+                continue
+            return {"hotel": hotel_name, "date": iso(checkin), "status":"No rate found", "reason": f"exception:{e.__class__.__name__}"}
+        finally:
+            if context:
+                try:
+                    await context.close()
+                except:
+                    pass
+
+# ---------- Orchestrator (single browser reused; per-task contexts) ----------
 async def scrape_hotels_for_dates(
     hotels: List[Dict],
     dates: List[datetime],
@@ -377,99 +434,39 @@ async def scrape_hotels_for_dates(
     debug: bool = False,
 ) -> Dict:
     """
-    Orchestrates all scrapes. Works both locally and on Streamlit Cloud.
-    - Tries RC_CHROME_PATH if provided (local portable Chromium)
-    - Otherwise launches Playwright's bundled Chromium with Cloud-safe flags
-    - Reuses a single browser/context, limits concurrency with a semaphore
+    Orchestrates all scrapes.
+    - Launches one Chromium
+    - Creates a fresh context per task (robust against context/page closes)
+    - Limits concurrency via a semaphore
     - One-time breakfast detection on the first date per hotel
     """
     results: Dict[Tuple[str, str], Dict] = {}
-    exe = os.getenv("RC_CHROME_PATH")
 
     # FIRST date per hotel used for breakfast detection
     first_date_for: Dict[str, datetime] = {}
     if dates:
         min_date = min(dates)
         for h in hotels:
-            first_date_for[h["name"]] = min_date
+            if "name" in h and h["name"]:
+                first_date_for[h["name"]] = min_date
 
     async with async_playwright() as p:
-        # ---- Cloud-safe launch args ----
-        launch_args = {
-            "headless": True,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-                # Streamlit Cloud / container safety & stability:
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process",
-            ],
-        }
-
-        # Try explicit executable locally if provided, else fall back to default
-        browser = None
-        if exe and os.path.exists(exe):
-            try:
-                browser = await p.chromium.launch(executable_path=exe, **launch_args)
-            except Exception:
-                browser = None
-
-        # Fallback: Playwright-managed Chromium (preferred on Streamlit Cloud)
-        if browser is None:
-            try:
-                browser = await p.chromium.launch(**launch_args)
-            except Exception:
-                # Last resort: try a channel if available in this environment
-                for ch in ("chromium", "chrome", "msedge"):
-                    try:
-                        browser = await p.chromium.launch(channel=ch, **launch_args)
-                        break
-                    except Exception:
-                        pass
-                if browser is None:
-                    raise  # propagate the original failure
-
-        context = await browser.new_context(
-            locale="de-DE",
-            user_agent=(
-                f"{COMPANY}-RateChecker/1.0 "
-                f"(public rates; Playwright; contact: {CONTACT})"
-            ),
-        )
-
-        # Speed-up: block heavy resources globally
-        async def _route(route):
-            rt = route.request.resource_type
-            if rt in ("image", "media", "font"):
-                await route.abort()
-            else:
-                await route.continue_()
-
-        await context.route("**/*", _route)
+        browser = await p.chromium.launch(headless=True, args=LAUNCH_ARGS)
 
         sem = asyncio.Semaphore(NUM_CONCURRENCY)
 
         async def _task(h, d):
             async with sem:
-                await asyncio.sleep(random.uniform(0.08, 0.25))
-                want_bf = (first_date_for.get(h["name"]) == d)
-                r = await _scrape_one_on_context(
-                    context,
-                    h,
-                    d,
-                    selected_currency,
-                    debug,
-                    check_breakfast=want_bf,
+                await asyncio.sleep(random.uniform(0.08, 0.25))  # light stagger
+                want_bf = (first_date_for.get(h.get("name","")) == d)
+                r = await _scrape_one(
+                    h, d, selected_currency,
+                    browser, debug=debug, check_breakfast=want_bf
                 )
-                results[(h["name"], iso(d))] = r
+                results[(h.get("name",""), iso(d))] = r
 
-        await asyncio.gather(*[_task(h, d) for h in hotels for d in dates])
+        await asyncio.gather(*[_task(h, d) for h in hotels for d in dates if h and d])
 
-        await context.close()
         await browser.close()
 
     return results
