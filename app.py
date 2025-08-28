@@ -5,24 +5,61 @@ from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+# ---- One-time Playwright browser bootstrap (Streamlit Cloud friendly) ----
+import os, sys, subprocess, pathlib, contextlib
+import streamlit as st
+
+def _ensure_chromium_installed() -> None:
+    """
+    Ensure Playwright's Chromium is present.
+    Tries a normal install, then falls back to --with-deps.
+    Keeps the UI clean by not throwing big warnings unless both attempts fail.
+    """
+    cache_dir = pathlib.Path.home() / ".cache" / "ms-playwright"
+    chromium_dir = cache_dir / "chromium"
+
+    # If already installed, we're done
+    if chromium_dir.exists():
+        return
+
+    # Prefer an idempotent install without extra apt deps (we already supply packages.txt)
+    commands = [
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+    ]
+
+    last_err = None
+    for cmd in commands:
+        try:
+            # Keep env, but set a stable browsers path
+            env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(cache_dir)}
+            res = subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+            )
+            # Success: break
+            return
+        except subprocess.CalledProcessError as e:
+            last_err = e
+
+    # If both attempts failed, don't spam the UI—just give a compact note.
+    # Full details will be in Streamlit Cloud logs.
+    with contextlib.suppress(Exception):
+        st.info("Preparing browser… if this is the first run, it may take a minute.")
+    if last_err:
+        # Send concise failure line to the log; you can view it under Manage app → Logs
+        print("[playwright-install] failed:", last_err.stdout[-500:] if last_err.stdout else last_err)
+
+_ensure_chromium_installed()
+# -------------------------------------------------------------------------
 
 from scraper import scrape_hotels_for_dates, ddmmyyyy
 
 st.set_page_config(page_title="RateChecker • Booking.com", page_icon="🔎", layout="wide")
-
-# Ensure Playwright Chromium exists on Streamlit Cloud (runs once per container)
-import sys, subprocess, pathlib, streamlit as st
-PLAYWRIGHT_CACHE = pathlib.Path.home() / ".cache" / "ms-playwright"
-if not PLAYWRIGHT_CACHE.exists():
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-    except Exception as e:
-        st.warning(f"Playwright install failed (will retry on next run): {e}")
-
-
 
 
 TITLE = "RateChecker — Booking.com"
@@ -223,12 +260,13 @@ with st.container():
     with col2:
         st.markdown("**Custom dates (DD.MM.YYYY, one per line)**")
         st.text_area(
-            "",
-            key="custom_dates_text",   # always editable
+            "Custom dates (DD.MM.YYYY, one per line)",
+            key="custom_dates_text",
             height=220,
-            placeholder="01.01.2026\n17.01.2026\n...",
+            label_visibility="visible",  # or "collapsed" if you want it hidden
             help="You can edit freely. Dates are auto-sorted when you Generate or Run scraping.",
         )
+
 
 with st.expander(ADVANCED, expanded=False):
     currencies = ["EUR","USD","GBP","CHF","PLN","CZK","SEK","NOK","DKK","HUF"]
@@ -344,10 +382,10 @@ if st.session_state.last_out_df is not None:
 
     # Optional debug table (above results)
     if st.session_state.show_debug and st.session_state.last_debug_df is not None:
-        st.dataframe(st.session_state.last_debug_df, use_container_width=True)
+        st.dataframe(st.session_state.last_debug_df, use_container_width="stretch")
 
     # Results table
-    st.dataframe(st.session_state.last_out_df, use_container_width=True)
+    st.dataframe(st.session_state.last_out_df, use_container_width="stretch")
 
     # Bottom row: Download (left) and Reset (right)
     dcol_l, dcol_r = st.columns([1, 1])
