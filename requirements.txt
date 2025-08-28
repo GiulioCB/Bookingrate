@@ -4,6 +4,3 @@ playwright==1.53.0
 rapidfuzz>=3
 openpyxl
 xlsxwriter
-# DO NOT PIN greenlet; Playwright will install a compatible version
-
-

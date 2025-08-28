@@ -370,11 +370,23 @@ async def _scrape_one_on_context(context, hotel: Dict, checkin: datetime, select
     }
 
 # ---------- Orchestrator (single browser reused) ----------
-async def scrape_hotels_for_dates(hotels: List[Dict], dates: List[datetime], selected_currency: str="EUR", debug: bool=False) -> Dict:
-    results: Dict[Tuple[str,str], Dict] = {}
+async def scrape_hotels_for_dates(
+    hotels: List[Dict],
+    dates: List[datetime],
+    selected_currency: str = "EUR",
+    debug: bool = False,
+) -> Dict:
+    """
+    Orchestrates all scrapes. Works both locally and on Streamlit Cloud.
+    - Tries RC_CHROME_PATH if provided (local portable Chromium)
+    - Otherwise launches Playwright's bundled Chromium with Cloud-safe flags
+    - Reuses a single browser/context, limits concurrency with a semaphore
+    - One-time breakfast detection on the first date per hotel
+    """
+    results: Dict[Tuple[str, str], Dict] = {}
     exe = os.getenv("RC_CHROME_PATH")
 
-    # Determine the FIRST date (once) to compute breakfast per hotel
+    # FIRST date per hotel used for breakfast detection
     first_date_for: Dict[str, datetime] = {}
     if dates:
         min_date = min(dates)
@@ -382,40 +394,61 @@ async def scrape_hotels_for_dates(hotels: List[Dict], dates: List[datetime], sel
             first_date_for[h["name"]] = min_date
 
     async with async_playwright() as p:
-        launch_args = dict(
-            headless=True,
-            args=[
+        # ---- Cloud-safe launch args ----
+        launch_args = {
+            "headless": True,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
+                # Streamlit Cloud / container safety & stability:
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
             ],
-        )
+        }
+
+        # Try explicit executable locally if provided, else fall back to default
         browser = None
         if exe and os.path.exists(exe):
-            try: browser = await p.chromium.launch(executable_path=exe, **launch_args)
-            except: browser = None
+            try:
+                browser = await p.chromium.launch(executable_path=exe, **launch_args)
+            except Exception:
+                browser = None
+
+        # Fallback: Playwright-managed Chromium (preferred on Streamlit Cloud)
         if browser is None:
-            for ch in ("chrome","msedge"):
-                try:
-                    browser = await p.chromium.launch(channel=ch, **launch_args)
-                    break
-                except: pass
-        if browser is None:
-            browser = await p.chromium.launch(**launch_args)
+            try:
+                browser = await p.chromium.launch(**launch_args)
+            except Exception:
+                # Last resort: try a channel if available in this environment
+                for ch in ("chromium", "chrome", "msedge"):
+                    try:
+                        browser = await p.chromium.launch(channel=ch, **launch_args)
+                        break
+                    except Exception:
+                        pass
+                if browser is None:
+                    raise  # propagate the original failure
 
         context = await browser.new_context(
             locale="de-DE",
-            user_agent=(f"{COMPANY}-RateChecker/1.0 (public rates; Playwright; contact: {CONTACT})")
+            user_agent=(
+                f"{COMPANY}-RateChecker/1.0 "
+                f"(public rates; Playwright; contact: {CONTACT})"
+            ),
         )
 
-        # Speed-up: block heavy resources
+        # Speed-up: block heavy resources globally
         async def _route(route):
             rt = route.request.resource_type
             if rt in ("image", "media", "font"):
                 await route.abort()
             else:
                 await route.continue_()
+
         await context.route("**/*", _route)
 
         sem = asyncio.Semaphore(NUM_CONCURRENCY)
@@ -424,10 +457,18 @@ async def scrape_hotels_for_dates(hotels: List[Dict], dates: List[datetime], sel
             async with sem:
                 await asyncio.sleep(random.uniform(0.08, 0.25))
                 want_bf = (first_date_for.get(h["name"]) == d)
-                r = await _scrape_one_on_context(context, h, d, selected_currency, debug, check_breakfast=want_bf)
+                r = await _scrape_one_on_context(
+                    context,
+                    h,
+                    d,
+                    selected_currency,
+                    debug,
+                    check_breakfast=want_bf,
+                )
                 results[(h["name"], iso(d))] = r
 
         await asyncio.gather(*[_task(h, d) for h in hotels for d in dates])
+
         await context.close()
         await browser.close()
 
