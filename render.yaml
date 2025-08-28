@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ratechecker
+    env: python
+
+    buildCommand: |
+      pip install --upgrade pip
+      pip install --only-binary=:all: -r requirements.txt
+
+    startCommand: |
+      echo "Installing Chromium for Playwright..." && \
+      PLAYWRIGHT_BROWSERS_PATH=/opt/render/.cache/ms-playwright \
+      python -m playwright install chromium && \
+      streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+
+    envVars:
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "/opt/render/.cache/ms-playwright"
+      - key: PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS
+        value: "1"

@@ -1,0 +1,9 @@
+streamlit
+pandas>=2.0
+playwright==1.46.0
+openpyxl
+xlsxwriter
+streamlit-authenticator
+rapidfuzz
+greenlet==3.0.3
+
