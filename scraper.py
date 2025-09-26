@@ -16,18 +16,18 @@ if sys.platform.startswith("win"):
         pass
 
 # ---------- Tunables (can override via environment) ----------
-NUM_CONCURRENCY = int(os.getenv("RC_CONCURRENCY", "2"))
-NAV_TIMEOUT_MS  = int(os.getenv("RC_NAV_TIMEOUT_MS", "15000"))
-SEL_TIMEOUT_MS  = int(os.getenv("RC_SEL_TIMEOUT_MS", "9000"))
-SCAN_LIMIT      = int(os.getenv("RC_SCAN_LIMIT", "20"))  # how many price cells to scan per page
+NUM_CONCURRENCY = int(os.getenv("RC_CONCURRENCY", "4"))
+NAV_TIMEOUT_MS  = int(os.getenv("RC_NAV_TIMEOUT_MS", "10000"))
+SEL_TIMEOUT_MS  = int(os.getenv("RC_SEL_TIMEOUT_MS", "6000"))
+SCAN_LIMIT      = int(os.getenv("RC_SCAN_LIMIT", "15"))  # how many price cells to scan per page
 
 # Optional pacing / asset controls
 JITTER_MIN_MS   = int(os.getenv("RC_JITTER_MIN_MS", "200"))
 JITTER_MAX_MS   = int(os.getenv("RC_JITTER_MAX_MS", "600"))
 BLOCK_MEDIA     = os.getenv("RC_BLOCK_MEDIA", "1") == "1"  # default ON in containers
 
-COMPANY = os.getenv("COMPANY_NAME", "CBRE")
-CONTACT = os.getenv("RC_CONTACT", "rates@example.com")
+COMPANY = os.getenv("COMPANY_NAME", "EXAMPLE")
+CONTACT = os.getenv("RC_CONTACT", "rates@EXAPLE.com")
 PROXY_URL = os.getenv("PROXY_URL", "") or None
 
 # Chromium in containers
@@ -35,10 +35,12 @@ LAUNCH_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
+    "--disable-extensions",
     "--disable-gpu",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
+    "--muste--audio",
 ]
 
 # ---------- Utilities ----------
