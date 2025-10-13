@@ -16,7 +16,7 @@ if sys.platform.startswith("win"):
         pass
 
 # ---------- Tunables (can override via environment) ----------
-NUM_CONCURRENCY = int(os.getenv("RC_CONCURRENCY", "4"))
+NUM_CONCURRENCY = int(os.getenv("RC_CONCURRENCY", "3"))
 NAV_TIMEOUT_MS  = int(os.getenv("RC_NAV_TIMEOUT_MS", "10000"))
 SEL_TIMEOUT_MS  = int(os.getenv("RC_SEL_TIMEOUT_MS", "6000"))
 SCAN_LIMIT      = int(os.getenv("RC_SCAN_LIMIT", "15"))  # how many price cells to scan per page
