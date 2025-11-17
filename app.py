@@ -184,22 +184,36 @@ def generate_weekday_and_weekend_per_month(start: date, months: int) -> List[dat
 def format_dates_ddmmyyyy(dts: List[datetime]) -> str:
     return "\n".join(ddmmyyyy(d) for d in sorted(dts))
 
+#def normalize_custom_text():
+    #"""Read, parse, unique+sort the textarea → write back."""
+    #txt = st.session_state.get("custom_dates_text", "").strip()
+    #if not txt:
+        #return
+    #cleaned: List[datetime] = []
+    #for line in txt.splitlines():
+        #s = line.strip()
+        #if not s:
+            #continue
+        #try:
+            #cleaned.append(datetime.combine(parse_ddmmyyyy(s), datetime.min.time()))
+        #except Exception:
+            #pass
+    #cleaned = sorted(list({d: None for d in cleaned}.keys()))
+    #st.session_state["custom_dates_text"] = "\n".join(ddmmyyyy(d) for d in cleaned)
+
 def normalize_custom_text():
-    """Read, parse, unique+sort the textarea → write back."""
     txt = st.session_state.get("custom_dates_text", "").strip()
     if not txt:
         return
-    cleaned: List[datetime] = []
+    cleaned = []
     for line in txt.splitlines():
-        s = line.strip()
-        if not s:
-            continue
         try:
-            cleaned.append(datetime.combine(parse_ddmmyyyy(s), datetime.min.time()))
+            cleaned.append(datetime.combine(parse_ddmmyyyy(line.strip()), datetime.min.time()))
         except Exception:
             pass
-    cleaned = sorted(list({d: None for d in cleaned}.keys()))
-    st.session_state["custom_dates_text"] = "\n".join(ddmmyyyy(d) for d in cleaned)
+    cleaned = sorted({d for d in cleaned})
+    st.session_state["normalized_custom_dates"] = "\n".join(ddmmyyyy(d) for d in cleaned)
+    
 
 # ============ UI ============
 st.title(TITLE)
@@ -261,7 +275,6 @@ with st.container():
         st.markdown("**Custom dates (DD.MM.YYYY, one per line)**")
         st.text_area(
             "Custom dates (DD.MM.YYYY, one per line)",
-            value=format_dates_ddmmyyyy(cleaned),
             key="custom_dates_text",
             height=220,
             label_visibility="visible",  # or "collapsed" if you want it hidden
