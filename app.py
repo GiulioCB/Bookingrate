@@ -261,6 +261,7 @@ with st.container():
         st.markdown("**Custom dates (DD.MM.YYYY, one per line)**")
         st.text_area(
             "Custom dates (DD.MM.YYYY, one per line)",
+            value=format_dates_ddmmyyyy(cleaned),
             key="custom_dates_text",
             height=220,
             label_visibility="visible",  # or "collapsed" if you want it hidden
